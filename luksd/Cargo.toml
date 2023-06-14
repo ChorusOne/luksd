@@ -1,0 +1,22 @@
+[package]
+name = "luksd"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = "0.6"
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "0.14", features = ["full"] }
+hyper-rustls = { version = "0.23", features = ["http2"] }
+anyhow = "1"
+aide = { version = "0.10.0", features = ["axum"] }
+serde = { version = "1", features = ["derive"] }
+triggered = "0.1"
+clap = { version = "4", features = ["cargo", "derive"] }
+env_logger = "0.10.0"
+log = "0.4"
+tempdir = "0.3"
+base64 = "0.21"
+passwords = "3"
