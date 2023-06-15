@@ -25,7 +25,7 @@ use tokio::sync::oneshot::{channel, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use triggered::{trigger, Trigger};
-use yaml_rust::{Yaml, YamlLoader};
+use yaml_rust::{Yaml, YamlEmitter, YamlLoader};
 
 use std::sync::Arc;
 
@@ -82,6 +82,7 @@ async fn admin_list(
             ip,
             mode: e.mode.to_string(),
             extra_info: e.extra_info.lock().await.clone(),
+            extra_info_detailed: e.extra_info_detailed.lock().await.clone(),
         })
     }
     Ok(Json(list))
@@ -161,15 +162,18 @@ async fn get_key(
         let (trigger, listener) = trigger();
 
         let extra_info = Arc::new(Mutex::new(String::new()));
+        let extra_info_detailed = Arc::new(Mutex::new(String::new()));
 
         LuksRequest {
             extra_info: extra_info.clone(),
+            extra_info_detailed: extra_info_detailed.clone(),
             join: tokio::spawn(adapter(tx, async move {
                 match data.mode {
                     KeyRequestMode::Tpm {
                         quote1,
                         quote256,
                         quote384,
+                        eventlog,
                     } => {
                         let v1 = quote1
                             .verify(&luksd.pcr_dir, &luksd.pubkeys_dir, ip, "sha1", &data.nonce)
@@ -199,6 +203,11 @@ async fn get_key(
                             trace!("{ip}: sha1 - {v1:?}; sha256 - {v256:?}; sha384 - {v384:?}");
 
                             let mut extra_info = extra_info.lock().await;
+                            let mut extra_info_detailed = extra_info_detailed.lock().await;
+
+                            let eventlog_dir = luksd.eventlog_dir.join(ip.to_string());
+                            let sub_eventlog = EventLog::parse_b64(&eventlog).await;
+                            let exp_eventlog = EventLog::from_path(&eventlog_dir).await;
 
                             *extra_info += "TPM PCR mismatch:\n";
 
@@ -214,6 +223,59 @@ async fn get_key(
                                     })
                                 })
                             {
+                                if let Ok(eventlog) = &sub_eventlog {
+                                    if let Some(entry) = eventlog.log.get(&(idx as _)) {
+                                        if let Some(hash) = entry.1.get(algo) {
+                                            if Some(hash.to_lowercase())
+                                                != submitted.as_ref().map(|v| v.to_lowercase())
+                                            {
+                                                *extra_info_detailed += &format!("# WARNING!!! PCR {idx} IN EVENT LOG ({hash}) DOES NOT MATCH SIGNED PCR VALUE ({submitted:?})!! DO NOT TRUST THE FOLLOWING OUTPUT!!!\n");
+                                            }
+                                            if let Some(log) = exp_eventlog
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(|l| l.log.get(&(idx as _)))
+                                            {
+                                                *extra_info_detailed +=
+                                                    &format!("{idx} ({algo}):\n");
+                                                // Compute diff
+                                                for d in diff::slice(&entry.0, &log.0) {
+                                                    match d {
+                                                        diff::Result::Left(t) => {
+                                                            let num = t.0;
+                                                            let Event { data, ty, digests } = &t.1;
+                                                            let digest = digests.get(algo);
+                                                            *extra_info_detailed += &format!("  - submitted {num}: Event {{\n        ty: {ty},\n        digest: {digest:?}\n        data: {data}\n    }}\n");
+                                                        }
+                                                        diff::Result::Right(t) => {
+                                                            let num = t.0;
+                                                            let Event { data, ty, digests } = &t.1;
+                                                            let digest = digests.get(algo);
+                                                            *extra_info_detailed += &format!("  - stored {num}: Event {{\n        ty: {ty},\n        digest: {digest:?}\n        data: {data}\n    }}\n");
+                                                        }
+                                                        diff::Result::Both(t1, t2) => {
+                                                            let num1 = t1.0;
+                                                            let num2 = t2.0;
+                                                            let Event { digests, .. } = &t1.1;
+                                                            let digest = digests.get(algo);
+                                                            *extra_info_detailed += &format!("  - Event {num1} Match Expected ({num2}; {digest:?})\n");
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                *extra_info_detailed += &format!("{idx}:\n");
+                                                for (i, EventEntry(num, event)) in
+                                                    entry.0.iter().enumerate()
+                                                {
+                                                    let Event { data, ty, digests } = event;
+                                                    let digest = digests.get(algo);
+                                                    *extra_info_detailed += &format!("  - {i}:\n    submitted {num}: Event {{\n        ty: {ty},\n        digest: {digest:?}\n        data: {data}\n    }}\n");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 if let Some((short, long)) = PCR_MAP.get(idx as usize) {
                                     *extra_info += &format!(
                                         "{algo}[{idx} ({short})] - expected {expected}, got {submitted:?}. {long}\n"
@@ -226,6 +288,7 @@ async fn get_key(
                             }
 
                             core::mem::drop(extra_info);
+                            core::mem::drop(extra_info_detailed);
 
                             listener.await;
 
@@ -235,6 +298,11 @@ async fn get_key(
                             quote1.write_pcrs(&luksd.pcr_dir, ip, "sha1").await?;
                             quote256.write_pcrs(&luksd.pcr_dir, ip, "sha256").await?;
                             quote384.write_pcrs(&luksd.pcr_dir, ip, "sha384").await?;
+
+                            if sub_eventlog.is_ok() {
+                                debug!("Writing updated event log");
+                                EventLog::write(&eventlog_dir, eventlog).await?;
+                            }
                         } else {
                             debug!("PCR values match, unlocking...");
                         }
@@ -370,20 +438,27 @@ async fn register(
     let create_entry = move || {
         let (trigger, listener) = trigger();
         let extra_info = Arc::new(Mutex::new(String::new()));
+        let extra_info_detailed = Arc::new(Mutex::new(String::new()));
         LuksRequest {
             extra_info: extra_info.clone(),
+            extra_info_detailed,
             join: tokio::spawn(adapter(tx, async move {
                 match data.mode {
                     RegistrationMode::Tpm {
+                        eventlog,
                         pubkey,
                         quote1,
                         quote256,
                         quote384,
                     } => {
+                        let sub_eventlog = EventLog::parse_b64(&eventlog).await;
+
                         {
                             let mut extra_info = extra_info.lock().await;
                             *extra_info += "Has TPM\n";
                             *extra_info += &format!("pubkey - {pubkey}\n");
+                            *extra_info +=
+                                &format!("event log parsed - {}\n", sub_eventlog.is_ok());
                         }
 
                         debug!("Awaiting for approval");
@@ -396,6 +471,11 @@ async fn register(
                         quote1.write_pcrs(&luksd.pcr_dir, ip, "sha1").await?;
                         quote256.write_pcrs(&luksd.pcr_dir, ip, "sha256").await?;
                         quote384.write_pcrs(&luksd.pcr_dir, ip, "sha384").await?;
+
+                        if sub_eventlog.is_ok() {
+                            EventLog::write(&luksd.eventlog_dir.join(ip.to_string()), eventlog)
+                                .await?;
+                        }
                     }
                     RegistrationMode::Disk { pubkey } => {
                         {
@@ -510,8 +590,9 @@ impl Quote {
             .zip([pcrs_dir.join(format!("{ip}_{algo}.pcrs")), pcrs_path])
         {
             let (stdin, stderr, code) = cmd_stdin_raw(
-                "/usr/bin/tpm2_checkquote",
+                "/usr/bin/tpm2",
                 &[
+                    "checkquote".as_ref(),
                     "-u".as_ref(),
                     pubkeys_dir.join(ip.to_string()).as_ref(),
                     "-q".as_ref(),
@@ -598,9 +679,119 @@ impl Quote {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
+struct Event {
+    data: String,
+    ty: String,
+    digests: BTreeMap<String, String>,
+}
+
+impl Event {
+    fn parse(yaml: &Yaml) -> anyhow::Result<(usize, Self, usize)> {
+        let num = yaml["EventNum"]
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("invalid event num"))? as usize;
+        let pcr_index = yaml["PCRIndex"]
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("invalid event num"))? as usize;
+
+        Ok((
+            num,
+            Self {
+                data: yaml_to_string(&yaml["Event"]),
+                ty: yaml_to_string(&yaml["EventType"]),
+                digests: if let Yaml::Array(a) = &yaml["Digests"] {
+                    a.iter()
+                        .filter_map(|v| {
+                            Some((
+                                v["AlgorithmId"].clone().into_string()?,
+                                v["Digest"].clone().into_string()?,
+                            ))
+                        })
+                        .collect()
+                } else {
+                    Default::default()
+                },
+            },
+            pcr_index,
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct EventEntry(usize, Event);
+
+impl PartialEq for EventEntry {
+    fn eq(&self, other: &Self) -> bool {
+        &self.1 == &other.1
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct EventLog {
+    log: BTreeMap<usize, (Vec<EventEntry>, BTreeMap<String, String>)>,
+}
+
+impl EventLog {
+    pub async fn write(path: &Path, log_b64: String) -> anyhow::Result<()> {
+        let data = STANDARD.decode(&log_b64)?;
+        fs::write(&path, &data).await?;
+        Ok(())
+    }
+
+    pub fn parse(log_yaml: String) -> anyhow::Result<Self> {
+        let mut log: BTreeMap<usize, (Vec<EventEntry>, BTreeMap<String, String>)> = BTreeMap::new();
+
+        let yaml = YamlLoader::load_from_str(&log_yaml)?;
+        let yaml = yaml.get(0).ok_or_else(|| anyhow::anyhow!("Empty yaml"))?;
+
+        let Yaml::Array(v) = &yaml["events"] else {return Err(anyhow::anyhow!("Invalid events format"))};
+
+        for e in v {
+            let (idx, entry, pcr) = Event::parse(e)?;
+            log.entry(pcr).or_default().0.push(EventEntry(idx, entry));
+        }
+
+        for algo in ["sha1", "sha256", "sha384"] {
+            let Yaml::Hash(v) = &yaml["pcrs"][algo] else { continue };
+
+            for (pcr, hash) in v.iter().filter_map(|(k, v)| {
+                Some((
+                    k.as_i64()? as usize,
+                    v.as_i64()
+                        .map(|v| v.to_string())
+                        .or_else(|| v.clone().into_string())?,
+                ))
+            }) {
+                log.entry(pcr).or_default().1.insert(algo.to_string(), hash);
+            }
+        }
+
+        Ok(Self { log })
+    }
+
+    pub async fn parse_b64(log_b64: &str) -> anyhow::Result<Self> {
+        let data = STANDARD.decode(log_b64)?;
+
+        let dir = TempDir::new("luksd")?;
+        let eventlog_path = dir.path().join("eventlog");
+
+        fs::write(&eventlog_path, &data).await?;
+
+        Self::from_path(&eventlog_path).await
+    }
+
+    pub async fn from_path(path: &Path) -> anyhow::Result<Self> {
+        let stdout = cmd_stdin("/usr/bin/tpm2", &["eventlog".as_ref(), path.as_ref()], &[]).await?;
+
+        Self::parse(stdout)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 enum RegistrationMode {
     Tpm {
+        eventlog: String,
         pubkey: String,
         quote1: Quote,
         quote256: Quote,
@@ -627,6 +818,7 @@ struct KeyResponseData {
 #[derive(Serialize, Deserialize)]
 enum KeyRequestMode {
     Tpm {
+        eventlog: String,
         quote1: Quote,
         quote256: Quote,
         quote384: Quote,
@@ -647,6 +839,7 @@ struct LuksRequest {
     approval: Trigger,
     mode: &'static str,
     extra_info: Arc<Mutex<String>>,
+    extra_info_detailed: Arc<Mutex<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -654,6 +847,7 @@ struct LuksRequestInfo {
     ip: IpAddr,
     mode: String,
     extra_info: String,
+    extra_info_detailed: String,
 }
 
 pub struct Luksd {
@@ -662,6 +856,7 @@ pub struct Luksd {
     headers_dir: PathBuf,
     pcr_dir: PathBuf,
     pubkeys_dir: PathBuf,
+    eventlog_dir: PathBuf,
     nonces: Mutex<BTreeMap<Instant, u64>>,
 }
 
@@ -673,6 +868,7 @@ impl Luksd {
             headers_dir: config.headers,
             pcr_dir: config.pcrs,
             pubkeys_dir: config.pubkeys,
+            eventlog_dir: config.eventlogs,
             nonces: Default::default(),
         }
     }
@@ -752,4 +948,14 @@ fn gen_pwd() -> String {
     };
 
     pg.generate_one().unwrap()
+}
+
+fn yaml_to_string(yaml: &Yaml) -> String {
+    let mut out = String::new();
+
+    let mut emitter = YamlEmitter::new(&mut out);
+
+    let _ = emitter.dump(yaml);
+
+    out
 }

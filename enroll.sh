@@ -32,6 +32,7 @@ done
   cat ak.pub | base64 -w 0 | jq -Rs '{ mode: { Tpm: { pubkey: . } } }'
   cat hdr.img | base64 -w 0 | jq -Rs '{ header: . }'
   cat password | base64 -w 0 | jq -Rs '{ key: . }'
+  cat /sys/kernel/security/tpm0/binary_bios_measurements | base64 -w 0 | jq -Rs '{ mode: { Tpm: { eventlog: . } } }'
   for hty in "1" "256" "384"; do
     algo="sha$hty"
     for ty in "sig" "msg" "pcrs"; do
@@ -42,7 +43,7 @@ done
         | jq -s "{ mode: { Tpm: { quote$hty: { msg: .[0], sig: .[1], pcr: .[2] } } } }"
   done
 ) \
-  | jq -s '.[0] * .[1] * .[2] * .[3] * .[4] * .[5]' \
+  | jq -s '.[0] * .[1] * .[2] * .[3] * .[4] * .[5] * .[6]' \
   | curl -X POST http://localhost:3000/machine/register -d @- -H 'Content-Type: application/json' -v
 
 # TODO: also submit /sys/kernel/security/tpm0/binary_bios_measurements (to be processed by tpm2_eventlog)

@@ -21,6 +21,9 @@ pub struct Config {
     /// Path to saved public keys
     #[arg(short = 'P', long, default_value = "pubkeys")]
     pubkeys: PathBuf,
+    /// Path to saved event logs
+    #[arg(short, long, default_value = "eventlogs")]
+    eventlogs: PathBuf,
 }
 
 #[tokio::main]

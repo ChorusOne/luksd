@@ -255,6 +255,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e496a50fda8aacccc86d7529e2c1e0892dbd0f898a6b5645b5561b89c3210efa"
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -638,6 +644,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "diff",
  "env_logger",
  "hmac-sha256",
  "hyper",
@@ -646,6 +653,7 @@ dependencies = [
  "passwords",
  "rand 0.8.5",
  "serde",
+ "serde_json",
  "tempdir",
  "tokio",
  "triggered",
