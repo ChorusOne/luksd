@@ -17,7 +17,7 @@ if [ ! -f ak.pub ]; then
 fi
 
 for algo in "sha1" "sha256" "sha384"; do
-  tpm2_quote -c ak.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256 -F serialized
+  tpm2_quote -c ak.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256
 done
 
 # verify
