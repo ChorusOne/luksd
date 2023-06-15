@@ -3,11 +3,11 @@
 set -e
 
 if [ ! -f ak.pub ]; then
-  tpm2_createek -c ek.handle -G ecc -u ek.pub
-  tpm2_createak -C ek.handle -c ak.ctx -u ak.pub -n ak.name
+  tpm2 createek -c ek.handle -G ecc -u ek.pub
+  tpm2 createak -C ek.handle -c ak.ctx -u ak.pub -n ak.name
 
   # Remove with: tpm2_evictcontrol -c ak.handle
-  tpm2_evictcontrol -o ak.handle -c ak.ctx
+  tpm2 evictcontrol -o ak.handle -c ak.ctx
 
   rm ak.name ek.handle ak.ctx ek.pub
 
@@ -17,13 +17,13 @@ if [ ! -f ak.pub ]; then
 fi
 
 for algo in "sha1" "sha256" "sha384"; do
-  tpm2_quote -c ak.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256
+  tpm2 quote -c ak.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256 -F serialized
 done
 
 # verify
 
 for algo in "sha1" "sha256" "sha384"; do
-  tpm2_checkquote -u ak.pub -m "quote_${algo}.msg" -s "quote_${algo}.sig" -f "quote_${algo}.pcrs" -g sha256
+  tpm2 checkquote -u ak.pub -m "quote_${algo}.msg" -s "quote_${algo}.sig" -f "quote_${algo}.pcrs" -g sha256
 done
 
 # register request
