@@ -60,16 +60,14 @@ async fn admin_list(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> axum::response::Result<Json<Vec<LuksRequestInfo>>> {
     debug!("List");
-    let list = luksd
-        .map
-        .lock()
-        .await
-        .iter()
-        .map(|(&ip, e)| LuksRequestInfo {
+    let mut list = vec![];
+    for (&ip, e) in &*luksd.map.lock().await {
+        list.push(LuksRequestInfo {
             ip,
             mode: e.mode.to_string(),
+            extra_info: e.extra_info.lock().await.clone(),
         })
-        .collect();
+    }
     debug!("List: {list:?}");
     Ok(Json(list))
 }
@@ -147,7 +145,10 @@ async fn get_key(
     let create_entry = move || {
         let (trigger, listener) = trigger();
 
+        let extra_info = Arc::new(Mutex::new(String::new()));
+
         LuksRequest {
+            extra_info: extra_info.clone(),
             join: tokio::spawn(adapter(tx, async move {
                 match data.mode {
                     KeyRequestMode::Tpm {
@@ -155,21 +156,11 @@ async fn get_key(
                         quote256,
                         quote384,
                     } => {
-                        let tmpdir = TempDir::new("luksd")?;
-
                         let v1 = quote1
-                            .verify(
-                                &tmpdir,
-                                &luksd.pcr_dir,
-                                &luksd.pubkeys_dir,
-                                ip,
-                                "sha1",
-                                &data.nonce,
-                            )
+                            .verify(&luksd.pcr_dir, &luksd.pubkeys_dir, ip, "sha1", &data.nonce)
                             .await?;
                         let v256 = quote256
                             .verify(
-                                &tmpdir,
                                 &luksd.pcr_dir,
                                 &luksd.pubkeys_dir,
                                 ip,
@@ -179,7 +170,6 @@ async fn get_key(
                             .await?;
                         let v384 = quote384
                             .verify(
-                                &tmpdir,
                                 &luksd.pcr_dir,
                                 &luksd.pubkeys_dir,
                                 ip,
@@ -192,26 +182,50 @@ async fn get_key(
                         if !v1.is_empty() || !v256.is_empty() || !v384.is_empty() {
                             debug!("TPM measurement mismatch! Awaiting for approval");
                             trace!("{ip}: sha1 - {v1:?}; sha256 - {v256:?}; sha384 - {v384:?}");
+
+                            let mut extra_info = extra_info.lock().await;
+
+                            *extra_info += "TPM PCR mismatch:\n";
+
+                            for (algo, idx, expected, submitted) in
+                                core::iter::IntoIterator::into_iter([
+                                    ("sha1", v1),
+                                    ("sha256", v256),
+                                    ("sha384", v384),
+                                ])
+                                .flat_map(|(algo, vals)| {
+                                    vals.into_iter().map(move |(idx, expected, submitted)| {
+                                        (algo, idx, expected, submitted)
+                                    })
+                                })
+                            {
+                                *extra_info += &format!(
+                                    "{algo}[{idx}] - expected {expected}, got {submitted:?}\n"
+                                );
+                            }
+
+                            core::mem::drop(extra_info);
+
                             listener.await;
 
                             // Write all PCRs to permanent storage
                             debug!("Writing updated PCR values");
 
-                            for algo in ["sha1", "sha256", "sha384"] {
-                                let p = format!("{ip}_{algo}.pcrs");
-                                fs::copy(tmpdir.path().join(&p), luksd.pcr_dir.join(&p)).await?;
-                            }
+                            quote1.write_pcrs(&luksd.pcr_dir, ip, "sha1").await?;
+                            quote256.write_pcrs(&luksd.pcr_dir, ip, "sha256").await?;
+                            quote384.write_pcrs(&luksd.pcr_dir, ip, "sha384").await?;
                         } else {
                             debug!("PCR values match, unlocking...");
                         }
                     }
                     KeyRequestMode::Disk { nonce_signature } => {
-                        //todo!()
                         debug!("Awaiting for approval");
+
+                        *extra_info.lock().await += "No TPM\n";
+
                         listener.await;
                     }
                 }
-                if need_approval {}
 
                 let key = fs::read(luksd.keys_dir.join(ip.to_string())).await?;
                 let header = fs::read(luksd.headers_dir.join(ip.to_string())).await?;
@@ -263,7 +277,12 @@ async fn cmd_stdin_raw(
 ) -> anyhow::Result<(String, String, i32)> {
     debug!("cmd: {:?}", cmd.as_ref());
 
-    let mut child = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn()?;
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
     let mut stdin = child
         .stdin
@@ -329,10 +348,45 @@ async fn register(
 
     let create_entry = move || {
         let (trigger, listener) = trigger();
+        let extra_info = Arc::new(Mutex::new(String::new()));
         LuksRequest {
+            extra_info: extra_info.clone(),
             join: tokio::spawn(adapter(tx, async move {
-                debug!("Awaiting for approval");
-                listener.await;
+                match data.mode {
+                    RegistrationMode::Tpm {
+                        pubkey,
+                        quote1,
+                        quote256,
+                        quote384,
+                    } => {
+                        {
+                            let mut extra_info = extra_info.lock().await;
+                            *extra_info += "Has TPM\n";
+                            *extra_info += &format!("pubkey - {pubkey}\n");
+                        }
+
+                        debug!("Awaiting for approval");
+                        listener.await;
+
+                        let pubkey = STANDARD.decode(&pubkey)?;
+                        let pubkey_path = luksd.pubkeys_dir.join(ip.to_string());
+                        fs::write(pubkey_path, pubkey).await?;
+
+                        quote1.write_pcrs(&luksd.pcr_dir, ip, "sha1").await?;
+                        quote256.write_pcrs(&luksd.pcr_dir, ip, "sha256").await?;
+                        quote384.write_pcrs(&luksd.pcr_dir, ip, "sha384").await?;
+                    }
+                    RegistrationMode::Disk { pubkey } => {
+                        {
+                            let mut extra_info = extra_info.lock().await;
+                            *extra_info += "No TPM\n";
+                            *extra_info += &format!("pubkey - {pubkey}\n");
+                        }
+
+                        debug!("Awaiting for approval");
+                        listener.await;
+                    }
+                }
 
                 let dir = TempDir::new("luksd")?;
                 let path = dir.path().join("hdr.img");
@@ -406,13 +460,14 @@ struct Quote {
 impl Quote {
     pub async fn verify(
         &self,
-        dir: &TempDir,
         pcrs_dir: &Path,
         pubkeys_dir: &Path,
         ip: IpAddr,
         algo: &str,
         nonce: &str,
     ) -> anyhow::Result<Vec<(i64, String, Option<String>)>> {
+        let dir = TempDir::new("luksd")?;
+
         // Write data for verification
 
         let quote_path = dir.path().join("quote.msg");
@@ -467,7 +522,13 @@ impl Quote {
                 })
                 .map(|p| {
                     p.iter()
-                        .filter_map(|(k, v)| k.as_i64().zip(v.clone().into_string()))
+                        .filter_map(|(k, v)| {
+                            k.as_i64().zip(
+                                v.as_i64()
+                                    .map(|v| v.to_string())
+                                    .or_else(|| v.clone().into_string()),
+                            )
+                        })
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
@@ -494,6 +555,7 @@ impl Quote {
 
         let mut verify_pcr = |i| {
             if let Some((exp, sub)) = mapping.remove(&i) {
+                trace!("{i}: {exp} - {sub:?}");
                 if Some(&exp) != sub.as_ref() {
                     out.push((i, exp, sub))
                 }
@@ -505,6 +567,13 @@ impl Quote {
         }
 
         Ok(out)
+    }
+
+    pub async fn write_pcrs(&self, pcr_dir: &Path, ip: IpAddr, algo: &str) -> anyhow::Result<()> {
+        let pcrs_path = pcr_dir.join(format!("{ip}_{algo}.pcrs"));
+        let pcrs = STANDARD.decode(&self.pcr)?;
+        fs::write(&pcrs_path, &pcrs).await?;
+        Ok(())
     }
 }
 
@@ -556,12 +625,14 @@ struct LuksRequest {
     join: JoinHandle<()>,
     approval: Trigger,
     mode: &'static str,
+    extra_info: Arc<Mutex<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LuksRequestInfo {
     ip: IpAddr,
     mode: String,
+    extra_info: String,
 }
 
 pub struct Luksd {
@@ -589,7 +660,7 @@ impl Luksd {
         let now = Instant::now();
 
         // Clear any old nonces
-        nonces.split_off(&now);
+        *nonces = nonces.split_off(&now);
 
         let then = now + Duration::from_secs(30);
 
@@ -617,7 +688,7 @@ impl Luksd {
         hash.update(ip.to_string().as_bytes());
         hash.finalize()
             .into_iter()
-            .map(|v| format!("{v:0x}"))
+            .map(|v| format!("{v:02x}"))
             .collect::<Vec<_>>()
             .join("")
     }
@@ -634,12 +705,14 @@ impl Luksd {
                 let mut hash = hmac_sha256::Hash::new();
                 hash.update(v.to_le_bytes());
                 hash.update(ip.to_string().as_bytes());
-                hash.finalize()
+                let stored_nonce = hash
+                    .finalize()
                     .into_iter()
-                    .map(|v| format!("{v:0x}"))
+                    .map(|v| format!("{v:02x}"))
                     .collect::<Vec<_>>()
-                    .join("")
-                    == nonce
+                    .join("");
+                debug!("{stored_nonce} | {nonce}");
+                stored_nonce == nonce
             })
             .is_some()
     }
