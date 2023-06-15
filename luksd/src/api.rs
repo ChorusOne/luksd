@@ -4,17 +4,19 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Extension;
 use axum::Router;
-use base64::{engine::general_purpose, Engine};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use core::future::Future;
 use hyper::{Body, Request};
 use log::*;
 use passwords::PasswordGenerator;
+use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::ffi::OsStr;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tempdir::TempDir;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -23,6 +25,7 @@ use tokio::sync::oneshot::{channel, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use triggered::{trigger, Trigger};
+use yaml_rust::{Yaml, YamlLoader};
 
 use std::sync::Arc;
 
@@ -34,7 +37,8 @@ pub fn router(luksd: Arc<Luksd>) -> Router {
         .route("/admin/servers", get(admin_list))
         .route("/admin/approve", post(admin_approve))
         .route("/admin/reject", post(admin_reject))
-        .route("/machine/key", get(get_key))
+        .route("/machine/nonce", get(get_nonce))
+        .route("/machine/key", post(get_key))
         .route("/machine/register", post(register))
         .finish_api_with(&mut api, api_docs)
         .route("/api.json", get(serve_api))
@@ -111,15 +115,28 @@ async fn admin_reject(
     Ok(())
 }
 
+async fn get_nonce(
+    luksd: State<Arc<Luksd>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> axum::response::Result<String> {
+    let ip = addr.ip();
+    Ok(luksd.get_nonce(ip).await.to_string())
+}
+
 async fn get_key(
     luksd: State<Arc<Luksd>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> axum::response::Result<Json<Data>> {
+    Json(data): Json<KeyRequest>,
+) -> axum::response::Result<Json<KeyResponseData>> {
     let mut guard = luksd.map.lock().await;
 
     let ip = addr.ip();
 
     // TODO: verify IP address
+
+    if !luksd.verify_nonce(&data.nonce, ip).await {
+        Err(StatusCode::UNAUTHORIZED)?;
+    }
 
     debug!("Get key {ip:?}");
 
@@ -129,17 +146,79 @@ async fn get_key(
 
     let create_entry = move || {
         let (trigger, listener) = trigger();
+
         LuksRequest {
             join: tokio::spawn(adapter(tx, async move {
-                debug!("Awaiting for approval");
-                listener.await;
+                match data.mode {
+                    KeyRequestMode::Tpm {
+                        quote1,
+                        quote256,
+                        quote384,
+                    } => {
+                        let tmpdir = TempDir::new("luksd")?;
+
+                        let v1 = quote1
+                            .verify(
+                                &tmpdir,
+                                &luksd.pcr_dir,
+                                &luksd.pubkeys_dir,
+                                ip,
+                                "sha1",
+                                &data.nonce,
+                            )
+                            .await?;
+                        let v256 = quote256
+                            .verify(
+                                &tmpdir,
+                                &luksd.pcr_dir,
+                                &luksd.pubkeys_dir,
+                                ip,
+                                "sha256",
+                                &data.nonce,
+                            )
+                            .await?;
+                        let v384 = quote384
+                            .verify(
+                                &tmpdir,
+                                &luksd.pcr_dir,
+                                &luksd.pubkeys_dir,
+                                ip,
+                                "sha384",
+                                &data.nonce,
+                            )
+                            .await?;
+
+                        // Wait for approval
+                        if !v1.is_empty() || !v256.is_empty() || !v384.is_empty() {
+                            debug!("TPM measurement mismatch! Awaiting for approval");
+                            trace!("{ip}: sha1 - {v1:?}; sha256 - {v256:?}; sha384 - {v384:?}");
+                            listener.await;
+
+                            // Write all PCRs to permanent storage
+                            debug!("Writing updated PCR values");
+
+                            for algo in ["sha1", "sha256", "sha384"] {
+                                let p = format!("{ip}_{algo}.pcrs");
+                                fs::copy(tmpdir.path().join(&p), luksd.pcr_dir.join(&p)).await?;
+                            }
+                        } else {
+                            debug!("PCR values match, unlocking...");
+                        }
+                    }
+                    KeyRequestMode::Disk { nonce_signature } => {
+                        //todo!()
+                        debug!("Awaiting for approval");
+                        listener.await;
+                    }
+                }
+                if need_approval {}
 
                 let key = fs::read(luksd.keys_dir.join(ip.to_string())).await?;
                 let header = fs::read(luksd.headers_dir.join(ip.to_string())).await?;
 
-                Ok(Data {
-                    header: general_purpose::STANDARD.encode(&header),
-                    key: general_purpose::STANDARD.encode(&key),
+                Ok(KeyResponseData {
+                    header: STANDARD.encode(&header),
+                    key: STANDARD.encode(&key),
                 })
             })),
             approval: trigger,
@@ -161,8 +240,14 @@ async fn get_key(
 
     let ret = rx
         .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("{e}");
+            StatusCode::UNAUTHORIZED
+        })?
+        .map_err(|e| {
+            error!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(ret))
 }
@@ -171,7 +256,11 @@ async fn adapter<T>(tx: Sender<anyhow::Result<T>>, fut: impl Future<Output = any
     let _ = tx.send(fut.await);
 }
 
-async fn cmd_stdin(cmd: impl AsRef<OsStr>, args: &[&OsStr], input: &[u8]) -> anyhow::Result<()> {
+async fn cmd_stdin_raw(
+    cmd: impl AsRef<OsStr>,
+    args: &[&OsStr],
+    input: &[u8],
+) -> anyhow::Result<(String, String, i32)> {
     debug!("cmd: {:?}", cmd.as_ref());
 
     let mut child = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn()?;
@@ -186,14 +275,25 @@ async fn cmd_stdin(cmd: impl AsRef<OsStr>, args: &[&OsStr], input: &[u8]) -> any
 
     let out = child.wait_with_output().await?;
 
-    if out.status.code().unwrap_or_default() != 0 {
-        return Err(anyhow::anyhow!(
-            "command failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+    Ok((
+        String::from_utf8(out.stdout)?,
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        out.status.code().unwrap_or_default(),
+    ))
+}
+
+async fn cmd_stdin(
+    cmd: impl AsRef<OsStr>,
+    args: &[&OsStr],
+    input: &[u8],
+) -> anyhow::Result<String> {
+    let (output, stderr, code) = cmd_stdin_raw(cmd, args, input).await?;
+
+    if code != 0 {
+        return Err(anyhow::anyhow!("command failed: {}", stderr));
     }
 
-    Ok(())
+    Ok(output)
 }
 
 async fn register(
@@ -209,13 +309,13 @@ async fn register(
 
     debug!("Register {ip:?}");
 
-    let Json(data): Json<Data> = FromRequest::from_request(req, &()).await?;
+    let Json(data): Json<RegistrationData> = FromRequest::from_request(req, &()).await?;
 
-    let header = general_purpose::STANDARD
+    let header = STANDARD
         .decode(data.header)
         .map_err(|_| StatusCode::NOT_ACCEPTABLE)?;
 
-    let tmp_key = general_purpose::STANDARD
+    let tmp_key = STANDARD
         .decode(data.key)
         .map_err(|_| StatusCode::NOT_ACCEPTABLE)?;
 
@@ -239,23 +339,20 @@ async fn register(
 
                 fs::write(&path, &header).await?;
 
-                let master_key = fs::read_to_string(&luksd.master_key).await?;
                 let random_key = gen_pwd();
 
                 fs::write(luksd.keys_dir.join(ip.to_string()), random_key.as_bytes()).await?;
 
-                for key in [master_key, random_key] {
-                    let mut input = tmp_key.to_string();
-                    input.push_str("\n");
-                    input.push_str(&key);
+                let mut input = tmp_key.to_string();
+                input.push_str("\n");
+                input.push_str(&random_key);
 
-                    cmd_stdin(
-                        "/usr/sbin/cryptsetup",
-                        &["luksAddKey".as_ref(), path.as_ref(), "-q".as_ref()],
-                        input.as_bytes(),
-                    )
-                    .await?;
-                }
+                cmd_stdin(
+                    "/usr/sbin/cryptsetup",
+                    &["luksAddKey".as_ref(), path.as_ref(), "-q".as_ref()],
+                    input.as_bytes(),
+                )
+                .await?;
 
                 cmd_stdin(
                     "/usr/sbin/cryptsetup",
@@ -287,16 +384,172 @@ async fn register(
     core::mem::drop(guard);
 
     rx.await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("{e}");
+            StatusCode::UNAUTHORIZED
+        })?
+        .map_err(|e| {
+            error!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
-struct Data {
+struct Quote {
+    msg: String,
+    pcr: String,
+    sig: String,
+}
+
+impl Quote {
+    pub async fn verify(
+        &self,
+        dir: &TempDir,
+        pcrs_dir: &Path,
+        pubkeys_dir: &Path,
+        ip: IpAddr,
+        algo: &str,
+        nonce: &str,
+    ) -> anyhow::Result<Vec<(i64, String, Option<String>)>> {
+        // Write data for verification
+
+        let quote_path = dir.path().join("quote.msg");
+        let quote = STANDARD.decode(&self.msg)?;
+        fs::write(&quote_path, &quote).await?;
+
+        let sig_path = dir.path().join("quote.sig");
+        let sig = STANDARD.decode(&self.sig)?;
+        fs::write(&sig_path, &sig).await?;
+
+        let pcrs_path = dir.path().join(format!("{ip}_{algo}.pcrs"));
+        let pcrs = STANDARD.decode(&self.pcr)?;
+        fs::write(&pcrs_path, &pcrs).await?;
+
+        let mut data = [(); 2].map(|_| Default::default());
+
+        for (data, pcrs) in data
+            .iter_mut()
+            .zip([pcrs_dir.join(format!("{ip}_{algo}.pcrs")), pcrs_path])
+        {
+            let (stdin, stderr, code) = cmd_stdin_raw(
+                "/usr/bin/tpm2_checkquote",
+                &[
+                    "-u".as_ref(),
+                    pubkeys_dir.join(ip.to_string()).as_ref(),
+                    "-q".as_ref(),
+                    nonce.as_ref(),
+                    "-m".as_ref(),
+                    quote_path.as_ref(),
+                    "-s".as_ref(),
+                    sig_path.as_ref(),
+                    "-f".as_ref(),
+                    pcrs.as_ref(),
+                    "-g".as_ref(),
+                    "sha256".as_ref(),
+                ],
+                &[],
+            )
+            .await?;
+
+            let stdin = YamlLoader::load_from_str(&stdin).ok();
+
+            let pcrs = stdin
+                .as_ref()
+                .and_then(|p| p.get(0))
+                .and_then(|p| {
+                    if let Yaml::Hash(h) = &p["pcrs"][algo] {
+                        Some(h)
+                    } else {
+                        None
+                    }
+                })
+                .map(|p| {
+                    p.iter()
+                        .filter_map(|(k, v)| k.as_i64().zip(v.clone().into_string()))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+
+            *data = (pcrs, stderr, code);
+        }
+
+        let [(exp_pcrs, _, _), (mut sub_pcrs, sub_stderr, sub_code)] = data;
+
+        if sub_code != 0 {
+            return Err(anyhow::anyhow!("Could not verify quote: {sub_stderr}"));
+        }
+
+        let mut mapping = BTreeMap::new();
+
+        for (id, val) in exp_pcrs {
+            let sub_val = sub_pcrs.remove(&id);
+            mapping.insert(id, (val, sub_val));
+        }
+
+        // Verify PCRs
+
+        let mut out = vec![];
+
+        let mut verify_pcr = |i| {
+            if let Some((exp, sub)) = mapping.remove(&i) {
+                if Some(&exp) != sub.as_ref() {
+                    out.push((i, exp, sub))
+                }
+            }
+        };
+
+        for i in [0, 1, 2, 3, 4, 5, 7, 8, 9, 23] {
+            verify_pcr(i);
+        }
+
+        Ok(out)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+enum RegistrationMode {
+    Tpm {
+        pubkey: String,
+        quote1: Quote,
+        quote256: Quote,
+        quote384: Quote,
+    },
+    Disk {
+        pubkey: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct RegistrationData {
     header: String,
     key: String,
+    mode: RegistrationMode,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyResponseData {
+    header: String,
+    key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+enum KeyRequestMode {
+    Tpm {
+        quote1: Quote,
+        quote256: Quote,
+        quote384: Quote,
+    },
+    Disk {
+        nonce_signature: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyRequest {
+    nonce: String,
+    mode: KeyRequestMode,
 }
 
 struct LuksRequest {
@@ -315,7 +568,9 @@ pub struct Luksd {
     map: Mutex<BTreeMap<IpAddr, LuksRequest>>,
     keys_dir: PathBuf,
     headers_dir: PathBuf,
-    master_key: PathBuf,
+    pcr_dir: PathBuf,
+    pubkeys_dir: PathBuf,
+    nonces: Mutex<BTreeMap<Instant, u64>>,
 }
 
 impl Luksd {
@@ -324,8 +579,69 @@ impl Luksd {
             map: Default::default(),
             keys_dir: config.keys,
             headers_dir: config.headers,
-            master_key: config.master_key,
+            pcr_dir: config.pcrs,
+            pubkeys_dir: config.pubkeys,
+            nonces: Default::default(),
         }
+    }
+
+    fn update_nonces(nonces: &mut BTreeMap<Instant, u64>) {
+        let now = Instant::now();
+
+        // Clear any old nonces
+        nonces.split_off(&now);
+
+        let then = now + Duration::from_secs(30);
+
+        // If the last value is over 5 seconds past the current then value, insert it
+        if nonces
+            .last_key_value()
+            .map(|(k, _)| then.saturating_duration_since(*k).as_secs_f64() >= 5.0)
+            .unwrap_or(true)
+        {
+            nonces.insert(then, thread_rng().gen());
+        }
+    }
+
+    pub async fn get_nonce(&self, ip: IpAddr) -> String {
+        let mut nonces = self.nonces.lock().await;
+
+        Self::update_nonces(&mut nonces);
+
+        // update_nonces ensures that there is at least one entry
+        let nonce = *nonces.last_key_value().unwrap().1;
+
+        // Hash the nonce with the IP address so that all hosts have unique nonces
+        let mut hash = hmac_sha256::Hash::new();
+        hash.update(nonce.to_le_bytes());
+        hash.update(ip.to_string().as_bytes());
+        hash.finalize()
+            .into_iter()
+            .map(|v| format!("{v:0x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    pub async fn verify_nonce(&self, nonce: &str, ip: IpAddr) -> bool {
+        let mut nonces = self.nonces.lock().await;
+
+        Self::update_nonces(&mut nonces);
+
+        nonces
+            .values()
+            .find(|v| {
+                // We must do the same process as in get_nonce
+                let mut hash = hmac_sha256::Hash::new();
+                hash.update(v.to_le_bytes());
+                hash.update(ip.to_string().as_bytes());
+                hash.finalize()
+                    .into_iter()
+                    .map(|v| format!("{v:0x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+                    == nonce
+            })
+            .is_some()
     }
 }
 

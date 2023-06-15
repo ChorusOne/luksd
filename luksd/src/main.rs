@@ -15,9 +15,12 @@ pub struct Config {
     /// Path to keys
     #[arg(short, long, default_value = "keys")]
     keys: PathBuf,
-    /// Path to the backup master key
-    #[arg(short, long, default_value = "master_key")]
-    master_key: PathBuf,
+    /// Path to saved PCRs
+    #[arg(short, long, default_value = "pcrs")]
+    pcrs: PathBuf,
+    /// Path to saved public keys
+    #[arg(short = 'P', long, default_value = "pubkeys")]
+    pubkeys: PathBuf,
 }
 
 #[tokio::main]
