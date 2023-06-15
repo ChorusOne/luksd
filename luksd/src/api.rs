@@ -29,6 +29,22 @@ use yaml_rust::{Yaml, YamlLoader};
 
 use std::sync::Arc;
 
+const PCR_MAP: &[(&str, &str)] = &[
+    ("firmware", "bios was updated?"),
+    ("firmware data", "bios settings changed?"),
+    ("ext code", ""),
+    ("ext data", ""),
+    ("boot mgr code", "boot device order changed?"),
+    (
+        "boot mgr cfg",
+        "bootloader config changed / GPT table changed",
+    ),
+    ("resume", "resume from S4/S5 changed"),
+    ("secure boot", "secure boot state changed"),
+    ("cmdline", "cmdline changed"),
+    ("initrd/efi", "initrd/EFI load options"),
+];
+
 pub fn router(luksd: Arc<Luksd>) -> Router {
     let mut api = OpenApi::default();
 
@@ -68,7 +84,6 @@ async fn admin_list(
             extra_info: e.extra_info.lock().await.clone(),
         })
     }
-    debug!("List: {list:?}");
     Ok(Json(list))
 }
 
@@ -199,9 +214,15 @@ async fn get_key(
                                     })
                                 })
                             {
-                                *extra_info += &format!(
-                                    "{algo}[{idx}] - expected {expected}, got {submitted:?}\n"
-                                );
+                                if let Some((short, long)) = PCR_MAP.get(idx as usize) {
+                                    *extra_info += &format!(
+                                        "{algo}[{idx} ({short})] - expected {expected}, got {submitted:?}. {long}\n"
+                                    );
+                                } else {
+                                    *extra_info += &format!(
+                                        "{algo}[{idx}] - expected {expected}, got {submitted:?}\n"
+                                    );
+                                }
                             }
 
                             core::mem::drop(extra_info);
