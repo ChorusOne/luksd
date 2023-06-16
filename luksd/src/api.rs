@@ -622,7 +622,7 @@ async fn register(
 #[derive(Serialize, Deserialize)]
 struct Quote {
     msg: String,
-    pcr: String,
+    pcr: BTreeMap<String,String>,
     sig: String,
 }
 
@@ -862,7 +862,7 @@ enum RegistrationMode {
         eventlog: String,
         pubkey: String,
         quote1: Quote,
-        quote256: Quote,
+        quote256:Quote,
         quote384: Quote,
     },
     Disk {
