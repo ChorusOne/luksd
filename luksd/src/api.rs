@@ -622,7 +622,7 @@ async fn register(
 #[derive(Serialize, Deserialize)]
 struct Quote {
     msg: String,
-    pcr: BTreeMap<String,String>,
+    pcr: BTreeMap<usize, String>,
     sig: String,
 }
 
@@ -648,7 +648,7 @@ impl Quote {
         fs::write(&sig_path, &sig).await?;
 
         let pcrs_path = dir.path().join(format!("{ip}_{algo}.pcrs"));
-        let pcrs = STANDARD.decode(&self.pcr)?;
+        let pcrs = serde_json::to_string_pretty(&self.pcr)?;
         fs::write(&pcrs_path, &pcrs).await?;
 
         let mut data = [(); 2].map(|_| Default::default());
@@ -741,7 +741,7 @@ impl Quote {
 
     pub async fn write_pcrs(&self, pcr_dir: &Path, ip: IpAddr, algo: &str) -> anyhow::Result<()> {
         let pcrs_path = pcr_dir.join(format!("{ip}_{algo}.pcrs"));
-        let pcrs = STANDARD.decode(&self.pcr)?;
+        let pcrs = serde_json::to_string_pretty(&self.pcr)?;
         fs::write(&pcrs_path, &pcrs).await?;
         Ok(())
     }
@@ -862,7 +862,7 @@ enum RegistrationMode {
         eventlog: String,
         pubkey: String,
         quote1: Quote,
-        quote256:Quote,
+        quote256: Quote,
         quote384: Quote,
     },
     Disk {
