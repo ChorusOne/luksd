@@ -39,7 +39,7 @@ mkdir -p -m 700 /root/.ssh
 echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINeV5n3ZIf21R4crbYfi/VrrSwplcjlHA7qIiKKMS8Dr chorusone-openssh-key-2023q1" > /root/.ssh/authorized_keys
 
 mkdir -p /etc/initramfs-tools/bin
-cp -p custom.sh /usr/share/initramfs/scripts/init-premount/custom && if [ ! -x /usr/share/initramfs/scripts/init-premount/custom ]; then chmod +x /usr/share/initramfs/scripts/init-premount/custom; fi
+cp -p custom.sh /usr/share/initramfs-tools/scripts/init-premount/custom && if [ ! -x /usr/share/initramfs-tools/scripts/init-premount/custom ]; then chmod +x /usr/share/initramfs-tools/scripts/init-premount/custom; fi
 
 cp -p hooks.sh /etc/initramfs-tools/hooks/ && if [ ! -x /etc/initramfs-tools/hooks/initramfs_hook.sh ]; then chmod +x /etc/initramfs-tools/hooks/hooks.sh ; fi
 
