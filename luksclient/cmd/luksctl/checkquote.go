@@ -10,9 +10,6 @@ var cmdCheckQuote = &cobra.Command{
 	Short: "checkQuote",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		checkquote.Check()
-		// if err != nil {
-		// 	return panic(err, "error decrypting device")
-		// }
 
 		return nil
 	},

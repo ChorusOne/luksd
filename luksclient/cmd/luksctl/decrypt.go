@@ -13,10 +13,7 @@ var cmdDecrypt = &cobra.Command{
 	Short: "decrypt",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		decrypt.DecryptDevice(encryptedDevice, method)
-		// if err != nil {
-		// 	return panic(err, "error decrypting device")
-		// }
-
+		
 		return nil
 	},
 }
