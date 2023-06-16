@@ -17,7 +17,7 @@ for bin in lsof rsync dd lsblk vim; do
   copy_exec "/usr/bin/${bin}" "/bin"
 done
 
-for bin in fdisk sfdisk parted hdparm wipefs mdadm lvm cryptsetup; do
+for bin in fdisk sfdisk parted hdparm wipefs mdadm lvm cryptsetup luksclient; do
   copy_exec "/usr/sbin/${bin}"  "/sbin/"
 done
 
