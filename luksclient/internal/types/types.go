@@ -1,5 +1,8 @@
 package types
 
+// "github.com/google/go-tpm-tools/proto/tpm"
+// "github.com/google/go-tpm/proto/tpm"
+
 const (
 	ServerURL = "http://192.168.122.173:3000"
 	Device    = "/dev/vdb1"
@@ -8,6 +11,19 @@ const (
 type KeyReponse struct {
 	Key    string `json:"key"`
 	Header string `json:"header"`
+}
+
+type Mode struct {
+	Disk DiskMode `json:"Disk"`
+}
+
+type DiskMode struct {
+	NonceSignature string `json:"nonce_signature"`
+}
+
+type GetDiskData struct {
+	Nonce string `json:"nonce"`
+	Mode  Mode   `json:"mode"`
 }
 
 type QuoteMessageDisk struct {
@@ -47,12 +63,14 @@ type TPMType struct {
 type Quote struct {
 	Msg string `json:"msg"`
 	Sig string `json:"sig"`
-	Pcr string `json:"pcr"`
+	Pcr PCRs   `json:"pcr"`
 }
 
-type TPMBase64 struct {
+type PCRs map[uint32][]byte
+
+type TPMInfo struct {
 	Quote  string
-	Pcrs   string
+	PCRs   PCRs
 	Sig    string
 	PubKey string
 }

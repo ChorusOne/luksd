@@ -1,8 +1,8 @@
 package luksctl
 
 import (
-	"github.com/spf13/cobra"
 	"github.com/ChorusOne/luksclient/internal/register"
+	"github.com/spf13/cobra"
 )
 
 // func main() {

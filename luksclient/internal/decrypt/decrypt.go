@@ -19,24 +19,50 @@ import (
 )
 
 func getKey() types.KeyReponse {
-	url := fmt.Sprintf("%s/machine/key", types.ServerURL)
 
-	fmt.Println("Getting header and key")
-	fmt.Printf("Waiting for admin approval: curl %s/admin/approve -d {IP}\n", url)
-	request, error := http.Get(url)
-	if error != nil {
-		panic(error)
-	}
-
-	defer request.Body.Close()
-
-	b, err := ioutil.ReadAll(request.Body)
+	nonceRes, err := http.Get(types.ServerURL + "/machine/nonce")
 	if err != nil {
 		panic(err)
 	}
 
+	defer nonceRes.Body.Close()
+
+	nonceData, err := ioutil.ReadAll(nonceRes.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	keyData := types.GetDiskData{
+		Nonce: string(nonceData),
+		Mode: types.Mode{
+			Disk: types.DiskMode{
+				NonceSignature: "",
+			},
+		},
+	}
+
+	quoteDataJSON, err := json.Marshal(keyData)
+	if err != nil {
+		panic(err)
+	}
+
+	resp, err := http.Post(types.ServerURL+"/machine/key", "application/json", bytes.NewBuffer(quoteDataJSON))
+	if err != nil {
+		panic(err)
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(resp.StatusCode)
+
 	res := types.KeyReponse{}
-	json.Unmarshal(b, &res)
+	json.Unmarshal(body, &res)
+
 	if res == (types.KeyReponse{}) {
 		panic("Server didn't return key and header")
 	}
@@ -56,31 +82,43 @@ func printMessageDescriptor(descriptor protoreflect.MessageDescriptor) {
 	}
 }
 
-func DecryptDeviceTPM(encryptDevice string) {
+func getKeyTPM() types.KeyReponse {
 	fmt.Println("Decrypting device with TPM")
-	
-	tpmBase64 := utils.CreateTPM()
+
+	tpmInfo := utils.GetTPM()
+
+	nonceRes, err := http.Get(types.ServerURL + "/machine/nonce")
+	if err != nil {
+		panic(err)
+	}
+
+	defer nonceRes.Body.Close()
+
+	nonceBody, err := ioutil.ReadAll(nonceRes.Body)
+	if err != nil {
+		panic(err)
+	}
 
 	quoteData := types.QuoteMessage{
-		Nonce: "nonce",
+		Nonce: string(nonceBody),
 		Mode: types.ModeType{
 			Tpm: types.TPMType{
-				PubKey:   tpmBase64.PubKey,
+				PubKey:   tpmInfo.PubKey,
 				EventLog: "eventLog",
 				Quote1: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 				Quote256: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 				Quote384: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 			},
 		},
@@ -105,10 +143,27 @@ func DecryptDeviceTPM(encryptDevice string) {
 
 	fmt.Println(resp.StatusCode)
 	fmt.Println(string(body))
+
+	res := types.KeyReponse{}
+	json.Unmarshal(body, &res)
+
+	if res == (types.KeyReponse{}) {
+		panic("Server didn't return key and header")
+	}
+
+	return res
 }
 
-func DecryptDevice(encryptDevice string) {
-	keyResponse := getKey()
+func DecryptDevice(encryptedDevice string, method string) {
+	var keyResponse types.KeyReponse
+
+	if method == "disk" {
+		keyResponse = getKey()
+	} else if method == "tpm" {
+		keyResponse = getKeyTPM()
+	} else {
+		panic("Invalid decription method can be tpm or disk")
+	}
 
 	key, err := base64.StdEncoding.DecodeString(keyResponse.Key)
 	if err != nil {
@@ -130,11 +185,18 @@ func DecryptDevice(encryptDevice string) {
 		log.Fatal(err)
 	}
 
+	decrypt(encryptedDevice)
+}
+
+func decrypt(encryptedDevice string) {
+
 	fmt.Println("Decrypting device...")
+
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("cryptsetup open %s --key-file /luks.key --header /hdr.img -q -v chorus", encryptDevice))
-	err = cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	fmt.Println("Decrypted Device")
 }

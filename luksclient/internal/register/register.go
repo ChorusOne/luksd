@@ -18,24 +18,22 @@ import (
 
 func RegisterClientTPM(h string, k string) {
 
-	tpmBase64 := utils.CreateTPM()
+	tpmInfo := utils.GetTPM()
 
 	header, err := os.ReadFile(h)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// headerClean := removeControlCharacters(string(header))
-	headerClean := strings.TrimSpace(string(header))
-	base64Header := base64.StdEncoding.EncodeToString([]byte(headerClean))
-
 	key, err := os.ReadFile(k)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// keyClean := removeControlCharacters(string(key))
+	headerClean := strings.TrimSpace(string(header))
 	keyClean := strings.TrimSpace(string(key))
+
+	base64Header := base64.StdEncoding.EncodeToString([]byte(headerClean))
 	base64Key := base64.StdEncoding.EncodeToString([]byte(keyClean))
 
 	quoteData := types.QuoteMessage{
@@ -43,22 +41,22 @@ func RegisterClientTPM(h string, k string) {
 		Key:    base64Key,
 		Mode: types.ModeType{
 			Tpm: types.TPMType{
-				PubKey:   tpmBase64.PubKey,
+				PubKey:   tpmInfo.PubKey,
 				EventLog: "eventLog",
 				Quote1: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 				Quote256: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 				Quote384: types.Quote{
-					Msg: tpmBase64.Quote,
-					Sig: tpmBase64.Sig,
-					Pcr: tpmBase64.Pcrs,
+					Msg: tpmInfo.Quote,
+					Sig: tpmInfo.Sig,
+					Pcr: tpmInfo.PCRs,
 				},
 			},
 		},
@@ -78,21 +76,17 @@ func RegisterClientTPM(h string, k string) {
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
+
+	fmt.Println("Registering client...")
+	fmt.Printf("Waiting for admin approval: curl %s/admin/approve -d {IP}\n", url)
+
 	resp, err := client.Do(req)
 	if err != nil {
 		panic(err)
 	}
 
-	defer resp.Body.Close()
-
 	fmt.Println("Response Status:", resp.Status)
 	fmt.Println("Response Headers:", resp.Header)
-	body, _ := ioutil.ReadAll(resp.Body)
-	fmt.Println("Response Body:", string(body))
-	// msg := quote.ProtoReflect()
-
-	// // Print the message descriptor
-	// printMessageDescriptor(msg.Descriptor())
 }
 
 func createEmtpyDevice(device string) error {
@@ -109,25 +103,28 @@ func createEmtpyDevice(device string) error {
 	return nil
 }
 
-func encryptDevice(encryptDevice string, password string) {
-	err := os.WriteFile("/tmp/luks.key", []byte(password), 0644)
+func encryptDevice(encryptedDevice string, password string) {
+	err := os.WriteFile("/dev/shm/luks.key", []byte(password), 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if _, err := os.Stat(encryptDevice); os.IsNotExist(err) {
-		err := createEmtpyDevice(encryptDevice)
+	if _, err := os.Stat(encryptedDevice); os.IsNotExist(err) {
+		err := createEmtpyDevice(encryptedDevice)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("cryptsetup luksFormat %s --header hdr.img -q -v < /tmp/luks.key", encryptDevice))
-	fmt.Print("Encrypting file...")
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("cryptsetup luksFormat %s --header hdr.img -q -v < /tmp/luks.key", encryptedDevice))
+
+	fmt.Println("Encrypting file...")
 	err = cmd.Run()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println("Done.")
 }
 
 func RegisterClient(h string, k string) {
@@ -138,29 +135,24 @@ func RegisterClient(h string, k string) {
 		log.Fatal(err)
 	}
 
-	// headerClean := removeControlCharacters(string(header))
-	headerClean := strings.TrimSpace(string(header))
-	base64Header := base64.StdEncoding.EncodeToString([]byte(headerClean))
-
 	key, err := os.ReadFile(k)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// keyClean := removeControlCharacters(string(key))
+	headerClean := strings.TrimSpace(string(header))
 	keyClean := strings.TrimSpace(string(key))
+
+	base64Header := base64.StdEncoding.EncodeToString([]byte(headerClean))
 	base64Key := base64.StdEncoding.EncodeToString([]byte(keyClean))
-	pubKey := "random"
-	pubKeyBase64 := base64.StdEncoding.EncodeToString([]byte(pubKey))
-	// data := fmt.Sprintf("{\"header\": \"%s\", \"key\": \"%s\"}", base64Header, base64Key)
-	// jsonData := []byte(data)
+	base64PubKey := base64.StdEncoding.EncodeToString([]byte("random"))
 
 	jsonData := types.QuoteMessageDisk{
 		Header: base64Header,
 		Key:    base64Key,
 		Mode: types.ModeTypeDisk{
 			Disk: types.DiskType{
-				PubKey:   pubKeyBase64,
+				PubKey:   base64PubKey,
 				EventLog: "eventLog",
 			},
 		},
@@ -188,6 +180,7 @@ func RegisterClient(h string, k string) {
 
 	fmt.Println("response Status:", response.Status)
 	fmt.Println("response Headers:", response.Header)
+
 	body, _ := ioutil.ReadAll(response.Body)
 	fmt.Println("response Body:", string(body))
 }
