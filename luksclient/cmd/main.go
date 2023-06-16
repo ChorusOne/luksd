@@ -1,9 +1,9 @@
 package main
 
 import (
-	"luksclient"
+	"github.com/ChorusOne/luksclient/cmd/luksctl"
 )
 
 func main() {
-	luksclient.Execute()
+	luksctl.Execute()
 }

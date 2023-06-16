@@ -5,23 +5,21 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"io"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"github.com/google/go-tpm-tools/client"
-	"github.com/google/go-tpm/tpm2"
-	"github.com/google/go-tpm/tpmutil"
 
-	"github.com/ChorusOne/luksclient/types"
+	"github.com/ChorusOne/luksclient/internal/types"
+	"github.com/ChorusOne/luksclient/internal/utils"
 )
 
-func getKey() types.keyResponse {
-	url := fmt.Sprintf("%s/machine/key", types.serverURL)
+func getKey() types.KeyReponse {
+	url := fmt.Sprintf("%s/machine/key", types.ServerURL)
 
 	fmt.Println("Getting header and key")
 	fmt.Printf("Waiting for admin approval: curl %s/admin/approve -d {IP}\n", url)
@@ -37,15 +35,14 @@ func getKey() types.keyResponse {
 		panic(err)
 	}
 
-	res := types.keyResponse{}
+	res := types.KeyReponse{}
 	json.Unmarshal(b, &res)
-	if res == (types.keyResponse{}) {
+	if res == (types.KeyReponse{}) {
 		panic("Server didn't return key and header")
 	}
 
 	return res
 }
-
 
 func printMessageDescriptor(descriptor protoreflect.MessageDescriptor) {
 	// Print the full name of the message
@@ -59,29 +56,31 @@ func printMessageDescriptor(descriptor protoreflect.MessageDescriptor) {
 	}
 }
 
-func decryptDeviceTPM() {
-	tpmBase64 := createTPM()
+func DecryptDeviceTPM(encryptDevice string) {
+	fmt.Println("Decrypting device with TPM")
+	
+	tpmBase64 := utils.CreateTPM()
 
-	quoteData := quoteMessage{
+	quoteData := types.QuoteMessage{
 		Nonce: "nonce",
-		Mode: modeType{
-			Tpm: tpmType{
-				PubKey: tpmBase64.pubKey,
+		Mode: types.ModeType{
+			Tpm: types.TPMType{
+				PubKey:   tpmBase64.PubKey,
 				EventLog: "eventLog",
-				Quote1: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
+				Quote1: types.Quote{
+					Msg: tpmBase64.Quote,
+					Sig: tpmBase64.Sig,
+					Pcr: tpmBase64.Pcrs,
 				},
-				Quote256: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
+				Quote256: types.Quote{
+					Msg: tpmBase64.Quote,
+					Sig: tpmBase64.Sig,
+					Pcr: tpmBase64.Pcrs,
 				},
-				Quote384: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
+				Quote384: types.Quote{
+					Msg: tpmBase64.Quote,
+					Sig: tpmBase64.Sig,
+					Pcr: tpmBase64.Pcrs,
 				},
 			},
 		},
@@ -92,7 +91,7 @@ func decryptDeviceTPM() {
 		panic(err)
 	}
 
-	resp, err := http.Post(serverURL + "/machine/key", "application/json", bytes.NewBuffer(quoteDataJSON))
+	resp, err := http.Post(types.ServerURL+"/machine/key", "application/json", bytes.NewBuffer(quoteDataJSON))
 	if err != nil {
 		panic(err)
 	}
@@ -108,9 +107,7 @@ func decryptDeviceTPM() {
 	fmt.Println(string(body))
 }
 
-
-
-func decryptDevice(encryptDevice string) {
+func DecryptDevice(encryptDevice string) {
 	keyResponse := getKey()
 
 	key, err := base64.StdEncoding.DecodeString(keyResponse.Key)

@@ -1,49 +1,47 @@
 package types
 
-
 const (
-	serverURL = "http://192.168.122.173:3000"
-	device = "/dev/vdb1"
+	ServerURL = "http://192.168.122.173:3000"
+	Device    = "/dev/vdb1"
 )
 
-
 type KeyReponse struct {
-	Key string `json:"key"`
+	Key    string `json:"key"`
 	Header string `json:"header"`
 }
 
-type quoteMessageDisk struct {
-	Mode modeTypeDisk `json:"mode"`
-	Header string `json:"header"`
-	Key string `json:"key"`
+type QuoteMessageDisk struct {
+	Mode   ModeTypeDisk `json:"mode"`
+	Header string       `json:"header"`
+	Key    string       `json:"key"`
 }
 
-type quoteMessage struct {
-	Nonce string `json:"nonce"`
-	Mode modeType `json:"mode"`
-	Header string `json:"header"`
-	Key string `json:"key"`
+type QuoteMessage struct {
+	Nonce  string   `json:"nonce"`
+	Mode   ModeType `json:"mode"`
+	Header string   `json:"header"`
+	Key    string   `json:"key"`
 }
 
-type modeType struct {
-	Tpm tpmType `json:"Tpm"`
+type ModeType struct {
+	Tpm TPMType `json:"Tpm"`
 }
 
-type modeTypeDisk struct {
-	Disk diskType `json:"Disk"`
+type ModeTypeDisk struct {
+	Disk DiskType `json:"Disk"`
 }
 
-type diskType struct {
-	PubKey string `json:"pubkey"`
+type DiskType struct {
+	PubKey   string `json:"pubkey"`
 	EventLog string `json:"eventlog"`
 }
 
-type tpmType struct {
-	PubKey string `json:"pubkey"`
+type TPMType struct {
+	PubKey   string `json:"pubkey"`
 	EventLog string `json:"eventlog"`
-	Quote1 Quote `json:"quote1"`
-	Quote256 Quote `json:"quote256"`
-	Quote384 Quote `json:"quote384"`
+	Quote1   Quote  `json:"quote1"`
+	Quote256 Quote  `json:"quote256"`
+	Quote384 Quote  `json:"quote384"`
 }
 
 type Quote struct {
@@ -53,8 +51,8 @@ type Quote struct {
 }
 
 type TPMBase64 struct {
-	quote string
-	pcrs string
-	sig string
-	pubKey string
+	Quote  string
+	Pcrs   string
+	Sig    string
+	PubKey string
 }
