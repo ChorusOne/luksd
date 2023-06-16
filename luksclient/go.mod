@@ -1,4 +1,4 @@
-module luksclient
+module github.com/ChorusOne/luksclient
 
 go 1.20
 

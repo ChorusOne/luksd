@@ -1,4 +1,4 @@
-package client
+package register
 
 import (
 	"bytes"
@@ -18,9 +18,11 @@ import (
 	"github.com/google/go-tpm-tools/client"
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpmutil"
+
+	"github.com/ChorusOne/luksclient/types"
 )
 
-func createTPM() TPMBase64 {
+func createTPM() types.TPMBase64 {
 	tpmWrite, err := tpmutil.OpenTPM("/dev/tpm0")
 	if err != nil {
 		fmt.Println(err)
@@ -60,7 +62,7 @@ func createTPM() TPMBase64 {
 	pcrsBase64 := base64.StdEncoding.EncodeToString([]byte(quote.GetPcrs().String()))
 	sigBase64 := base64.StdEncoding.EncodeToString(quote.GetRawSig())
 
-	return TPMBase64{quoteBase64, pcrsBase64, sigBase64, pubKeyBase64}
+	return types.TPMBase64{quoteBase64, pcrsBase64, sigBase64, pubKeyBase64}
 	// err = os.WriteFile("/tmp/quote", []byte(quoteBase64), 0644)
 	// if err != nil {
 	// 	panic(err)
@@ -79,54 +81,7 @@ func createTPM() TPMBase64 {
 
 }
 
-func decryptDeviceTPM() {
-	tpmBase64 := createTPM()
 
-	quoteData := quoteMessage{
-		Nonce: "nonce",
-		Mode: modeType{
-			Tpm: tpmType{
-				PubKey: tpmBase64.pubKey,
-				EventLog: "eventLog",
-				Quote1: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
-				},
-				Quote256: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
-				},
-				Quote384: Quote{
-					Msg: tpmBase64.quote,
-					Sig: tpmBase64.sig,
-					Pcr: tpmBase64.pcrs,
-				},
-			},
-		},
-	}
-
-	quoteDataJSON, err := json.Marshal(quoteData)
-	if err != nil {
-		panic(err)
-	}
-
-	resp, err := http.Post(serverURL + "/machine/key", "application/json", bytes.NewBuffer(quoteDataJSON))
-	if err != nil {
-		panic(err)
-	}
-
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(resp.StatusCode)
-	fmt.Println(string(body))
-}
 
 
 func registerClientTPM(h string, k string) {
@@ -151,24 +106,24 @@ func registerClientTPM(h string, k string) {
 	keyClean := strings.TrimSpace(string(key))
 	base64Key := base64.StdEncoding.EncodeToString([]byte(keyClean))
 
-	quoteData := quoteMessage{
+	quoteData := types.quoteMessage{
 		Header: base64Header,
 		Key: base64Key,
-		Mode: modeType{
-			Tpm: tpmType{
+		Mode: types.modeType{
+			Tpm: types.tpmType{
 				PubKey: tpmBase64.pubKey,
 				EventLog: "eventLog",
-				Quote1: Quote{
+				Quote1: types.Quote{
 					Msg: tpmBase64.quote,
 					Sig: tpmBase64.sig,
 					Pcr: tpmBase64.pcrs,
 				},
-				Quote256: Quote{
+				Quote256: types.Quote{
 					Msg: tpmBase64.quote,
 					Sig: tpmBase64.sig,
 					Pcr: tpmBase64.pcrs,
 				},
-				Quote384: Quote{
+				Quote384: types.Quote{
 					Msg: tpmBase64.quote,
 					Sig: tpmBase64.sig,
 					Pcr: tpmBase64.pcrs,
@@ -182,7 +137,7 @@ func registerClientTPM(h string, k string) {
 		panic(err)
 	}
 
-	url := fmt.Sprintf("%s/machine/register", serverURL)
+	url := fmt.Sprintf("%s/machine/register", types.serverURL)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		panic(err)
@@ -208,17 +163,7 @@ func registerClientTPM(h string, k string) {
 	// printMessageDescriptor(msg.Descriptor())
 }
 
-func printMessageDescriptor(descriptor protoreflect.MessageDescriptor) {
-	// Print the full name of the message
-	fmt.Println("Message Full Name:", descriptor.FullName())
 
-	// Print the fields of the message
-	fmt.Println("Message Fields:")
-	for i := 0; i < descriptor.Fields().Len(); i++ {
-		field := descriptor.Fields().Get(i)
-		fmt.Printf("Field %d: %s (%s)\n", i+1, field.Name(), field.FullName())
-	}
-}
 
 
 func createEmtpyDevice(device string) error {
@@ -256,66 +201,9 @@ func encryptDevice(encryptDevice string, password string) {
 	}
 }
 
-func getKey() keyResponse {
-	url := fmt.Sprintf("%s/machine/key", serverURL)
-
-	fmt.Println("Getting header and key")
-	fmt.Printf("Waiting for admin approval: curl %s/admin/approve -d {IP}\n", url)
-	request, error := http.Get(url)
-	if error != nil {
-		panic(error)
-	}
-
-	defer request.Body.Close()
-
-	b, err := ioutil.ReadAll(request.Body)
-	if err != nil {
-		panic(err)
-	}
-
-	res := keyResponse{}
-	json.Unmarshal(b, &res)
-	if res == (keyResponse{}) {
-		panic("Server didn't return key and header")
-	}
-
-	return res
-}
-
-func decryptDevice(encryptDevice string) {
-	keyResponse := getKey()
-
-	key, err := base64.StdEncoding.DecodeString(keyResponse.Key)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	header, err := base64.StdEncoding.DecodeString(keyResponse.Header)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = os.WriteFile("/luks.key", key, 0644)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = os.WriteFile("/hdr.img", header, 0644)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Decrypting device...")
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("cryptsetup open %s --key-file /luks.key --header /hdr.img -q -v chorus", encryptDevice))
-	err = cmd.Run()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Decrypted Device")
-}
 
 func registerClient(h string, k string) {
-	url := fmt.Sprintf("%s/machine/register", serverURL)
+	url := fmt.Sprintf("%s/machine/register", types.serverURL)
 
 	header, err := os.ReadFile(h)
 	if err != nil {
@@ -339,11 +227,11 @@ func registerClient(h string, k string) {
 	// data := fmt.Sprintf("{\"header\": \"%s\", \"key\": \"%s\"}", base64Header, base64Key)
 	// jsonData := []byte(data)
 
-	jsonData := quoteMessageDisk{
+	jsonData := types.quoteMessageDisk{
 		Header: base64Header,
 		Key: base64Key,
-		Mode: modeTypeDisk{
-			Disk: diskType{
+		Mode: types.modeTypeDisk{
+			Disk: types.diskType{
 				PubKey: pubKeyBase64,
 				EventLog: "eventLog",
 			},

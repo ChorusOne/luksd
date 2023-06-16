@@ -1,4 +1,4 @@
-package client
+package types
 
 
 const (
@@ -7,7 +7,7 @@ const (
 )
 
 
-type keyResponse struct {
+type KeyReponse struct {
 	Key string `json:"key"`
 	Header string `json:"header"`
 }
