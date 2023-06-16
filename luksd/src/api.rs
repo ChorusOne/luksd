@@ -6,6 +6,7 @@ use axum::Extension;
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use core::future::Future;
+use ed25519_dalek::{PublicKey, Signature, Verifier};
 use hyper::{Body, Request};
 use log::*;
 use passwords::PasswordGenerator;
@@ -21,7 +22,7 @@ use tempdir::TempDir;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::oneshot::{channel, Sender};
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use triggered::{trigger, Trigger};
@@ -71,13 +72,39 @@ async fn serve_api(Extension(api): Extension<OpenApi>) -> Json<OpenApi> {
     Json(api)
 }
 
+fn verify_admin_ip(addr: SocketAddr) -> axum::response::Result<()> {
+    let ip = addr.ip();
+    let ret = match ip {
+        IpAddr::V4(v4) => {
+            // See https://doc.rust-lang.org/src/core/net/ip_addr.rs.html#726
+            // the function is nightly only
+            let is_shared = v4.octets()[0] == 100 && (v4.octets()[1] & 0b1100_0000 == 0b0100_0000);
+            v4.is_loopback() || is_shared
+        }
+        IpAddr::V6(v6) => v6.is_loopback(),
+    };
+
+    if ret {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)?
+    }
+}
+
 async fn admin_list(
     luksd: State<Arc<Luksd>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> axum::response::Result<Json<Vec<LuksRequestInfo>>> {
+    verify_admin_ip(addr)?;
+
     debug!("List");
+
     let mut list = vec![];
-    for (&ip, e) in &*luksd.map.lock().await {
+    let mut map = luksd.map.lock().await;
+
+    map.retain(|_, v| !v.join.is_finished());
+
+    for (&ip, e) in &*map {
         list.push(LuksRequestInfo {
             ip,
             mode: e.mode.to_string(),
@@ -85,6 +112,7 @@ async fn admin_list(
             extra_info_detailed: e.extra_info_detailed.lock().await.clone(),
         })
     }
+
     Ok(Json(list))
 }
 
@@ -93,6 +121,8 @@ async fn admin_approve(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ip: String,
 ) -> axum::response::Result<()> {
+    verify_admin_ip(addr)?;
+
     let ip = ip
         .parse::<IpAddr>()
         .map_err(|_| StatusCode::NOT_ACCEPTABLE)?;
@@ -115,10 +145,11 @@ async fn admin_reject(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ip: String,
 ) -> axum::response::Result<()> {
+    verify_admin_ip(addr)?;
+
     let ip = ip
         .parse::<IpAddr>()
         .map_err(|_| StatusCode::NOT_ACCEPTABLE)?;
-
     let mut guard = luksd.map.lock().await;
 
     let entry = guard.remove(&ip).ok_or(StatusCode::NOT_FOUND)?;
@@ -155,6 +186,7 @@ async fn get_key(
     debug!("Get key {ip:?}");
 
     let (tx, rx) = channel();
+    let (tx2, rx2) = channel();
 
     let luksd = luksd.clone();
 
@@ -167,7 +199,7 @@ async fn get_key(
         LuksRequest {
             extra_info: extra_info.clone(),
             extra_info_detailed: extra_info_detailed.clone(),
-            join: tokio::spawn(adapter(tx, async move {
+            join: tokio::spawn(adapter(tx, rx2, async move {
                 match data.mode {
                     KeyRequestMode::Tpm {
                         quote1,
@@ -310,7 +342,19 @@ async fn get_key(
                     KeyRequestMode::Disk { nonce_signature } => {
                         debug!("Awaiting for approval");
 
-                        *extra_info.lock().await += "No TPM\n";
+                        /*let pubkey = fs::read(luksd.pubkeys_dir.join(ip.to_string())).await?;
+                        let pubkey = PublicKey::from_bytes(&pubkey)?;
+
+                        let signature = STANDARD.decode(nonce_signature)?;
+                        let signature = Signature::from_bytes(&signature)?;
+
+                        pubkey.verify(data.nonce.as_bytes(), &signature)?;*/
+
+                        {
+                            let mut extra_info = extra_info.lock().await;
+                            *extra_info += "No TPM\n";
+                            *extra_info += "Nonce signature verified\n";
+                        }
 
                         listener.await;
                     }
@@ -352,11 +396,22 @@ async fn get_key(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    core::mem::drop(tx2);
+
     Ok(Json(ret))
 }
 
-async fn adapter<T>(tx: Sender<anyhow::Result<T>>, fut: impl Future<Output = anyhow::Result<T>>) {
-    let _ = tx.send(fut.await);
+async fn adapter<T>(
+    tx: Sender<anyhow::Result<T>>,
+    rx: Receiver<()>,
+    fut: impl Future<Output = anyhow::Result<T>>,
+) {
+    tokio::select! {
+        _ = rx => (),
+        v = fut => {
+            let _ = tx.send(v);
+        }
+    }
 }
 
 async fn cmd_stdin_raw(
@@ -432,6 +487,7 @@ async fn register(
     let tmp_key = tmp_key.lines().next().unwrap_or("").to_string();
 
     let (tx, rx) = channel();
+    let (tx2, rx2) = channel();
 
     let luksd = luksd.clone();
 
@@ -442,7 +498,7 @@ async fn register(
         LuksRequest {
             extra_info: extra_info.clone(),
             extra_info_detailed,
-            join: tokio::spawn(adapter(tx, async move {
+            join: tokio::spawn(adapter(tx, rx2, async move {
                 match data.mode {
                     RegistrationMode::Tpm {
                         eventlog,
@@ -484,8 +540,18 @@ async fn register(
                             *extra_info += &format!("pubkey - {pubkey}\n");
                         }
 
+                        /*let pubkey = STANDARD.decode(pubkey)?;
+
+                        if pubkey.len() < 32 {
+                            return Err(anyhow::anyhow!("Invalid pubkey length"));
+                        }*/
+
                         debug!("Awaiting for approval");
                         listener.await;
+
+                        /*let pubkey_path = luksd.pubkeys_dir.join(ip.to_string());
+
+                        fs::write(pubkey_path, &pubkey[pubkey.len()-32..]).await?;*/
                     }
                 }
 
@@ -547,6 +613,8 @@ async fn register(
             error!("{e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    core::mem::drop(tx2);
 
     Ok(())
 }

@@ -4,16 +4,16 @@ set -e
 
 nonce=$(curl localhost:3000/machine/nonce)
 
-echo "$nonce"
+echo "$nonce" 1>&2
 
 for algo in "sha1" "sha256" "sha384"; do
-  tpm2 quote -c ak.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -q "$nonce" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256 -F serialized
+  tpm2 quote -c ak_tpm.handle -l "$algo:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23" -q "$nonce" -m "quote_${algo}.msg" -s "quote_${algo}.sig" -o "quote_${algo}.pcrs" -g sha256 -F serialized 1>&2
 done
 
 # verify locally
 
 for algo in "sha1" "sha256" "sha384"; do
-  tpm2 checkquote -u ak.pub -m "quote_${algo}.msg" -s "quote_${algo}.sig" -f "quote_${algo}.pcrs" -q "$nonce" -g sha256
+  tpm2 checkquote -u ak_tpm.pub -m "quote_${algo}.msg" -s "quote_${algo}.sig" -f "quote_${algo}.pcrs" -q "$nonce" -g sha256 1>&2
 done
 
 (
