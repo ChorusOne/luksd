@@ -1,3 +1,7 @@
+// luksd
+// Copyright 2023-2024 Chorus One
+// SPDX-License-Identifier: MIT
+
 use aide::{axum::ApiRouter, openapi::OpenApi, transform::TransformOpenApi};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Json, State};
 use axum::http::StatusCode;

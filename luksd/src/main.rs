@@ -1,3 +1,7 @@
+// luksd
+// Copyright 2023-2024 Chorus One
+// SPDX-License-Identifier: MIT
+
 use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
